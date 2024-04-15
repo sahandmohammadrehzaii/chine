@@ -1,0 +1,196 @@
+version: '3.8'
+
+networks:
+  rt-network:
+    driver: bridge
+
+secrets:
+  postgres_db:
+    file: ./.secrets/postgres_db
+  postgres_usr:
+    file: ./.secrets/postgres_usr
+  postgres_pass:
+    file: ./.secrets/postgres_pass
+  jwt_secret:
+    file: ./.secrets/jwt_secret
+  rfs_secret:
+    file: ./.secrets/rfs_secret
+
+x-service-defaults:
+  &service-defaults
+  ulimits:
+    core:
+      soft: 0
+      hard: 0
+  restart: unless-stopped
+  tty: true
+  networks:
+    - rt-network
+
+x-pg-secrets:
+  &pg-secrets
+  - postgres_db
+  - postgres_usr
+  - postgres_pass
+
+x-pg-secrets-env:
+  &pg-secrets-env
+  POSTGRES_DB_FILE: /run/secrets/postgres_db
+  POSTGRES_USER_FILE: /run/secrets/postgres_usr
+  POSTGRES_PASSWORD_FILE: /run/secrets/postgres_pass
+
+
+services:
+  postgres:
+    <<: *service-defaults
+    image: postgres:13.2-alpine
+    volumes:
+      - ./storage/postgres:/var/lib/postgresql/data
+    expose:
+      - '5432'
+    environment:
+      <<: *pg-secrets-env
+      TZ: UTC
+      LANG: en_US.utf8
+    secrets: *pg-secrets
+
+  redis:
+    <<: *service-defaults
+    image: redis:6.0.5-alpine
+    expose:
+      - '6379'
+    environment:
+      TZ: UTC
+      NODE_ENV: ${APP_ENV}
+
+  elastic:
+    <<: *service-defaults
+    image: elasticsearch:8.6.2
+    volumes:
+      - ./storage/elastic:/usr/share/elasticsearch/data
+    expose:
+      - '9200'
+    environment:
+      TZ: UTC
+      xpack.security.enabled: 'false'
+      ingest.geoip.downloader.enabled: 'false'
+      bootstrap.memory_lock: 'true'
+      discovery.type: single-node
+      ES_JAVA_OPTS: '-Xms512m -Xmx512m'
+
+  api:
+    &api
+    <<: *service-defaults
+    image: node:18-alpine
+    user: node:node
+    command: ['npm', 'run', '${API_CMD}']
+    working_dir: /main
+    volumes:
+      - ./storage/api:/main/storage
+      - ./shared-types:/shared-types
+      - ./api:/main
+    environment:
+      TZ: UTC
+      APP_TZ: ${APP_TZ}
+      APP_CALENDAR: ${APP_CALENDAR}
+      EXPOSED_PORT: 4500
+      APP_DOMAIN: ${APP_DOMAIN}
+      APP_PROTOCOL: ${APP_PROTOCOL}
+      APP_TITLE: ${APP_TITLE}
+      NODE_ENV: ${APP_ENV}
+      SMS_SECRET: ${SMS_SECRET}
+      SMS_TEMPLATE_VERIFY: ${SMS_TEMPLATE_VERIFY}
+      SMS_TEMPLATE_NOTIFS: ${SMS_TEMPLATE_NOTIFS}
+      SMS_FROM: ${SMS_FROM}
+      SMS_USE_TEXT: ${SMS_USE_TEXT}
+      ALLOW_EMAIL_AUTH: ${ALLOW_EMAIL_AUTH}
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID}
+    expose:
+      - '4500'
+    depends_on:
+      - postgres
+      - elastic
+    secrets:
+      - postgres_db
+      - postgres_usr
+      - postgres_pass
+      - jwt_secret
+      - rfs_secret
+
+  api_cron:
+    <<: *api
+    command: ['npm', 'run', 'cron']
+    expose: []
+
+  rfs:
+    &rfs
+    <<: *service-defaults
+    image: node:18-alpine
+    user: node:node
+    command: ['npm', 'run', '${RFS_CMD}']
+    working_dir: /main
+    volumes:
+      - ./storage/rfs:/main/storage
+      - ./shared-types:/shared-types
+      - ./rfs:/main
+    environment:
+      TZ: UTC
+      APP_TZ: ${APP_TZ}
+      EXPOSED_PORT: 3500
+      APP_DOMAIN: ${APP_DOMAIN}
+      APP_PROTOCOL: ${APP_PROTOCOL}
+      APP_TITLE: ${APP_TITLE}
+      NODE_ENV: ${APP_ENV}
+    expose:
+      - '3500'
+    depends_on:
+      - postgres
+    secrets:
+      - rfs_secret
+
+  rfs_cron:
+    <<: *rfs
+    command: ['npm', 'run', 'cron']
+    expose: []
+
+  next:
+    <<: *service-defaults
+    image: node:18-alpine
+    user: node:node
+    command: ['npm', 'run', '${NEXT_CMD}']
+    working_dir: /main
+    volumes:
+      - ./next:/main
+      - ./shared-types:/shared-types
+    environment:
+      TZ: UTC
+      EXPOSED_PORT: 3000
+      NEXT_PUBLIC_APP_TZ: ${APP_TZ}
+      NEXT_PUBLIC_APP_TITLE: ${APP_TITLE}
+      NEXT_PUBLIC_APP_DOMAIN: ${APP_DOMAIN}
+      NEXT_PUBLIC_APP_PROTOCOL: ${APP_PROTOCOL}
+      NEXT_PUBLIC_ENV: ${APP_ENV}
+      NODE_ENV: ${APP_ENV}
+      NEXT_PUBLIC_TRACKING_ID: ${APP_TRACKING_ID}
+      NEXT_PUBLIC_ALLOW_EMAIL_AUTH: ${ALLOW_EMAIL_AUTH}
+      NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID}
+    expose:
+      - '3000'
+    secrets: *pg-secrets
+
+  nginx:
+    <<: *service-defaults
+    image: nginx:1.18-alpine
+    volumes:
+      - ./storage/errors:/etc/nginx/service-errors
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./storage/rfs/public:/rfs/storage
+    environment:
+      TZ: UTC
+    ports:
+      - '127.0.0.1:${APP_PORT}:80'
+    depends_on:
+      - api
+      - rfs
+      - next
